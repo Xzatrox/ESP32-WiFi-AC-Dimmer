@@ -2,6 +2,11 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
 
+#include <WiFi.h> 
+#include <ESPAsyncWebServer.h> 
+const char* ssid = "Trox_2.4G"; 
+const char* password = "Zxcvbnm1983"; 
+
 // s3
 // #define SCR_Pin 9
 // #define RELAY_PIN 20
@@ -25,7 +30,23 @@
 
 unsigned char dim = 0;
 
-WiFiServer server(80);
+AsyncWebServer server(80); 
+
+SemaphoreHandle_t dimSemaphore;
+void createSemaphore(){
+    dimSemaphore = xSemaphoreCreateMutex();
+    xSemaphoreGive( ( dimSemaphore) );
+}
+
+// Lock the variable indefinietly. ( wait for it to be accessible )
+void lockVariable(){
+    xSemaphoreTake(dimSemaphore, dim);
+}
+
+// give back the semaphore.
+void unlockVariable(){
+    xSemaphoreGive(dimSemaphore);
+}
 
 const char mainPage[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html>
@@ -80,6 +101,8 @@ void setup()
     RELAY_OFF;
     AC_CTRL_OFF;
 
+    createSemaphore();
+
     server_setup();
 
     attachInterrupt(ZCD_PIN, zero_cross_int, RISING); // CHANGE FALLING RISING
@@ -90,7 +113,7 @@ void setup()
 
 void loop()
 {
-    dimmer_server();
+    //dimmer_server();
 
     // for (i = 1; i < 10; i++)
     // {
@@ -105,10 +128,10 @@ void zero_cross_int() // function to be fired at the zero crossing to dim the li
 {
     if (dim < 5)
         return;
-    if (dim > 90)
+    if (dim > 95)
         return;
 
-    int dimtime = (100 * dim);
+    int dimtime = (2 * 100 * dim);
     delayMicroseconds(dimtime); // Off cycle
     AC_CTRL_ON;                 // triac firing
     delayMicroseconds(500);     // triac On propagation delay
@@ -117,6 +140,7 @@ void zero_cross_int() // function to be fired at the zero crossing to dim the li
 
 void set_power(int level)
 {
+    lockVariable();
     dim = map(level, 0, 100, 95, 5);
     if (level == 0)
     {
@@ -124,13 +148,15 @@ void set_power(int level)
     }
     else
         RELAY_ON;
+    unlockVariable();
+    delay(100); 
 }
 
 void server_setup()
 {
     WiFi.disconnect();
 
-    WiFi.begin("Makerfabs", "20160704");
+    WiFi.begin(ssid, password);
 
     int connect_count = 0;
     while (WiFi.status() != WL_CONNECTED)
@@ -153,90 +179,30 @@ void server_setup()
         Serial.println(WiFi.localIP());
     }
 
+    // Define a route to serve the HTML page 
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) { 
+      Serial.println("ESP32 Web Server: New request received:");  // for debugging 
+      Serial.println("GET /");        // for debugging 
+      request->send(200, "text/html", mainPage); 
+    }); 
+    server.on("/update", HTTP_GET, [](AsyncWebServerRequest *request){
+ 
+    int paramsNr = request->params();
+    Serial.println(paramsNr);
+    
+    AsyncWebParameter* p = request->getParam(0);
+    Serial.print("Param name: ");
+    Serial.println(p->name());
+    Serial.print("Param value: ");
+    Serial.println(p->value());
+    Serial.println("------");
+
+    set_power(atoi(p->value().c_str()));
+ 
+    request->send(200, "text/plain", "message received");
+  });
+
     server.begin();
-}
-
-void dimmer_server()
-{
-
-    WiFiClient client = server.available(); // listen for incoming clients
-
-    if (client) // if you get a client,
-    {
-        Serial.println("---------------------------------------------------");
-        Serial.println("New Client.");
-        String currentLine = "";
-        while (client.connected())
-        { // loop while the client's connected
-            if (client.available())
-            {
-                char c = client.read();
-                Serial.write(c);
-
-                // PAGE:192.168.4.1
-                if (c == '\n')
-                { // if the byte is a newline character
-
-                    if (currentLine.length() == 0)
-                    {
-                        client.println("HTTP/1.1 200 OK");
-                        client.println("Content-type:text/html");
-                        client.println();
-
-                        client.println(mainPage);
-                        client.stop();
-
-                        return;
-                    }
-                    else
-                    {
-                        currentLine = "";
-                    }
-                }
-                else if (c != '\r')
-                {
-                    currentLine += c;
-                }
-
-                // API:保存设置
-                if (currentLine.endsWith("GET /update"))
-                {
-                    String get_request = "";
-                    // read GET next line
-                    while (1)
-                    {
-                        char c_get = client.read();
-                        Serial.write(c_get);
-                        if (c_get == '\n')
-                        {
-                            break;
-                        }
-                        else
-                        {
-                            get_request += c_get;
-                        }
-                    }
-
-                    client.println("HTTP/1.1 200 OK");
-                    client.println("Content-type:text/html");
-                    client.println();
-                    // client.println(mainPage);
-                    client.println("Update Over");
-                    client.println();
-                    client.stop();
-
-                    Serial.println(get_request);
-                    req_explain(get_request);
-
-                    return;
-                }
-            }
-        }
-        // close the connection:
-        client.stop();
-        Serial.println("Client Disconnected.");
-    }
-    return;
 }
 
 void req_explain(String str)
